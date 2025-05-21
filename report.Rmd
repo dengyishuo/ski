@@ -1,7 +1,7 @@
 ---
 title: "乘风破浪新起点"
 author:
-  - ©️MatrixSpk
+  - ©️Ski
 documentclass: ctexart
 keywords:
   - 报告
@@ -30,6 +30,7 @@ library(DT)
 library(kableExtra)
 library(knitr)
 library(xts)
+library(cowplot)
 library(showtext)
 font_add("SimHei", regular = "SimHei.ttf")
 showtext_auto()
@@ -37,11 +38,11 @@ showtext_auto()
 # 1. 参数配置
 config <- list(
   stock_list = list(
-    YD = "600238.ss",
+    YD   = "600238.ss",
     MKLD = "600882.ss",
     DHKJ = "600844.ss",
     HPDL = "603121.ss",
-    SLW = "300295.sz",
+    SLWW = "300295.sz",
     WYZK = "300420.sz",
     YSYE = "002566.sz",
     YCZY = "002998.sz"
@@ -70,12 +71,12 @@ process_stock_data <- function(config) {
       # 重新命名列名
       renamed_data <- tibble_data %>%
         rename(
-          date = Index,
+          Date = Index,
           open = Open,
           high = High,
           low = Low,
           close = Close,
-          trading = Volume,
+          volume = Volume,
           adjusted = Adjusted
         )
       # 数据对象动态命名
@@ -92,35 +93,8 @@ process_stock_data <- function(config) {
 calculate_indicators_and_signals <- function(stock_data_result, config) {
   for (company_name in names(stock_data_result)) {
     data <- stock_data_result[[company_name]]
-
-    # 计算KDJ指标和信号
-    ohlc <- xts(data %>% select(-date), order.by = data$date)
-    kdj_result <- KDJ(ohlc, n = config$indicators$kdj$n, m1 = config$indicators$kdj$d, m2 = config$indicators$kdj$j)
-    data <- data %>%
-       mutate(
-         k = kdj_result[,"K"],
-         d = kdj_result[,"D"],
-         j = kdj_result[,"J"],
-         kdj_signal = case_when(
-          quantmod::Lag(kdj_result[,"K"]) < quantmod::Lag(kdj_result[,"D"]) & kdj_result[,"K"] > kdj_result[,"D"]  ~ 1,           quantmod::Lag(kdj_result[,"K"]) > quantmod::Lag(kdj_result[,"D"]) & kdj_result[,"K"] < kdj_result[,"D"] ~ -1,
-      TRUE ~ 0
-    )
-  )
-
-    # 计算MACD指标和信号
-    macd_result <- MACD(data$close, nFast = config$indicators$macd$fast, nSlow = config$indicators$macd$slow, nSig = config$indicators$macd$signal)
-    data <- data %>%
-      mutate(
-        macd = macd_result[,"macd"],
-        signal_line = macd_result[,"signal"],
-        macd_diff = macd_result[,"macd"] - macd_result[,"signal"],
-        macd_signal = case_when(
-          macd_result[,"macd"] > macd_result[,"signal"] & dplyr::lag(macd_result[,"macd"], default = 0) < dplyr::lag(macd_result[,"signal"], default = 0) ~ 1,
-          macd_result[,"macd"] < macd_result[,"signal"] & dplyr::lag(macd_result[,"macd"], default = 0) > dplyr::lag(macd_result[,"signal"], default = 0) ~ -1,
-          TRUE ~ 0
-        )
-      )
-
+    
+    
     # 计算SMA指标和信号
     data <- data %>%
       mutate(
@@ -139,77 +113,179 @@ calculate_indicators_and_signals <- function(stock_data_result, config) {
         )
       )
 
+    # 计算KDJ指标和信号
+    ohlc <- xts(data %>% select(-Date), order.by = data$Date)
+    kdj_result <- KDJ(ohlc, n = config$indicators$kdj$n, m1 = config$indicators$kdj$d, m2 = config$indicators$kdj$j)
+    data <- data %>%
+       mutate(
+         k = kdj_result[,"K"],
+         d = kdj_result[,"D"],
+         j = kdj_result[,"J"],
+         kdj_signal = case_when(
+          quantmod::Lag(kdj_result[,"K"]) < quantmod::Lag(kdj_result[,"D"]) & kdj_result[,"K"] > kdj_result[,"D"]  ~ 1,           quantmod::Lag(kdj_result[,"K"]) > quantmod::Lag(kdj_result[,"D"]) & kdj_result[,"K"] < kdj_result[,"D"] ~ -1,
+      TRUE ~ 0
+    )
+  )
+
+    # 计算MACD指标和信号
+    macd_result <- MACD(data$close, nFast = config$indicators$macd$fast, nSlow = config$indicators$macd$slow, nSig = config$indicators$macd$signal)
+    data <- data %>%
+      mutate(
+        macd = macd_result[,"macd"],
+        macd_signal_line = macd_result[,"signal"],
+        macd_histogram = macd_result[,"macd"] - macd_result[,"signal"],
+        macd_signal = case_when(
+          macd_result[,"macd"] > macd_result[,"signal"] & dplyr::lag(macd_result[,"macd"], default = 0) < dplyr::lag(macd_result[,"signal"], default = 0) ~ 1,
+          macd_result[,"macd"] < macd_result[,"signal"] & dplyr::lag(macd_result[,"macd"], default = 0) > dplyr::lag(macd_result[,"signal"], default = 0) ~ -1,
+          TRUE ~ 0
+        )
+      )
+    
     stock_data_result[[company_name]] <- data
   }
   return(stock_data_result)
 }
 
-# 绘图函数
 plot_stock_analysis <- function(company_data, company_name) {
-  # 蜡烛图
-  candlestick_plot <- ggplot(company_data, aes(x = date)) +
+  # 定义统一的标题样式（左对齐）
+  title_style <- element_text(hjust = 0, size = 14, face = "bold")
+  
+  # 基础蜡烛图
+  price_plot <- ggplot(company_data, aes(x = Date)) +
     tidyquant::geom_candlestick(aes(open = open, high = high, low = low, close = close)) +
-    labs(title = paste(company_name, "蜡烛图"), subtitle = "OHLC数据") +
+    labs(title = paste(company_name, "-蜡烛图"), y = "价格") +
     theme_minimal(base_family = "SimHei") +
-    theme(legend.position = "top") +
-    scale_x_date(date_labels = "%Y-%m-%d",
-                 limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
-                 )
+    theme(
+      legend.position = "top",
+      axis.title.x = element_blank(),
+      plot.title = title_style  # 左对齐标题
+    ) +
+    scale_x_date(
+      date_labels = "%Y-%m-%d",
+      limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
+    )
+
+  # 成交量柱状图
+  volume_plot <- ggplot(company_data, aes(x = Date, y = volume)) +
+    geom_bar(
+      stat = "identity", 
+      aes(fill = ifelse(close > open, "上涨", "下跌")), 
+      alpha = 0.7
+    ) +
+    scale_fill_manual(values = c("上涨" = "#228B22", "下跌" = "#B22222")) +
+    labs(y = "成交量", title = paste(company_name, "-成交量")) +  # 添加标题
+    theme_minimal(base_family = "SimHei") +
+    theme(
+      legend.position = "top",
+      legend.title = element_blank(),
+      axis.title.x = element_blank(),
+      plot.title = title_style  # 左对齐标题
+    ) +
+    scale_x_date(
+      date_labels = "%Y-%m-%d",
+      limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
+    )
 
   # SMA和价格线图
-  sma_price_plot <- ggplot(company_data, aes(x = date)) +
+  sma_price_plot <- ggplot(company_data, aes(x = Date)) +
     tidyquant::geom_candlestick(aes(open = open, high = high, low = low, close = close)) +
-    labs(title = paste(company_name, "蜡烛图"), subtitle = "OHLC数据") +
+    labs(title = paste(company_name, "-SMA和价格走势"), y = "价格") +
     geom_line(aes(y = close, color = "价格"), size = 0.1) +
     geom_line(aes(y = sma_5, color = "SMA5"), size = 0.1) +
-    geom_line(aes(y = sma_10, color = "SMA10"), size =0.1) +
+    geom_line(aes(y = sma_10, color = "SMA10"), size = 0.1) +
     geom_line(aes(y = sma_20, color = "SMA20"), size = 0.1) +
-    geom_point(aes(y = close, color = factor(sma_signal)),
-               shape = 21, size = 0.3, alpha = 0.7) +
-    geom_point(aes(y = close, color = factor(price_signal)),
-               shape = 21, size = 0.3, alpha = 0.7) +
-    scale_color_manual(values = c("价格" = "black", "SMA5" = "blue", "SMA10" = "purple", "SMA20" = "orange",
-                                  "0" = "gray", "1" = "green", "-1" = "red", "2" = "yellow")) +
-    labs(title = paste(company_name, "SMA和价格线图"), subtitle = "SMA指标与价格走势") +
+    geom_point(aes(y = close, color = factor(sma_signal)), shape = 16, size = 3, alpha = 0.7) +
+    geom_point(aes(y = close, color = factor(price_signal)), shape = 16, size = 3, alpha = 0.7) +
+    scale_color_manual(values = c(
+      "价格" = "black", "SMA5" = "blue", "SMA10" = "purple", "SMA20" = "orange",
+      "0" = "gray", "1" = "green", "-1" = "red", "2" = "yellow"
+    )) +
     theme_minimal(base_family = "SimHei") +
-    theme(legend.position = "top") +
-    scale_x_date(date_labels = "%Y-%m-%d",
-                 limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
-                 )
+    theme(
+      legend.position = "top",
+      plot.title = title_style  # 左对齐标题
+    ) +
+    scale_x_date(
+      date_labels = "%Y-%m-%d",
+      limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
+    )
 
   # KDJ和价格线图
-  kdj_price_plot <- ggplot(company_data, aes(x = date)) +
+  kdj_price_plot <- ggplot(company_data, aes(x = Date)) +
     geom_line(aes(y = k, color = "K线"), size = 0.5) +
     geom_line(aes(y = d, color = "D线"), size = 0.5) +
     geom_line(aes(y = j, color = "J线"), size = 0.5) +
-    geom_point(aes(y = k, color = factor(kdj_signal)),
-               shape = 21, size = 0.3, alpha = 0.7) +
-    scale_color_manual(values = c("价格" = "black", "K线" = "blue", "D线" = "red", "J线" = "green", "0" = "gray", "1" = "green", "-1" = "red")) +
-    labs(title = paste(company_name, "KDJ和价格线图"), subtitle = "KDJ指标与价格走势") +
+    geom_point(aes(y = k, color = factor(kdj_signal)), shape = 16, size = 3, alpha = 0.7) +
+    scale_color_manual(values = c(
+      "K线" = "blue", "D线" = "red", "J线" = "green", "0" = "gray", "1" = "green", "-1" = "red"
+    )) +
+    labs(title = paste(company_name, "-KDJ指标"), y = "KDJ值") +
     theme_minimal(base_family = "SimHei") +
-    theme(legend.position = "top") +
-    scale_x_date(date_labels = "%Y-%m-%d",
-                 limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
-                 )
-  kdj_plot <- candlestick_plot/kdj_price_plot
+    theme(
+      legend.position = "top",
+      plot.title = title_style  # 左对齐标题
+    ) +
+    scale_x_date(
+      date_labels = "%Y-%m-%d",
+      limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
+    )
 
-  # MACD和价格线图
-  macd_price_plot <- ggplot(company_data, aes(x = date)) +
-    geom_line(aes(y = macd, color = "MACD线"), size = 0.5) +
-    geom_line(aes(y = signal_line, color = "MACD信号线"), size = 0.5) +
-    geom_point(aes(y = macd, color = factor(macd_signal)),
-               shape = 21, size = 0.3, alpha = 0.7) +
-    scale_color_manual(values = c("价格" = "black", "MACD线" = "blue", "MACD信号线" = "red", "0" = "gray", "1" = "green", "-1" = "red")) +
-    labs(title = paste(company_name, "MACD和价格线图"), subtitle = "MACD指标与价格走势") +
+  # MACD与价格图
+  macd_price_plot <- ggplot(company_data, aes(x = Date)) +
+    geom_line(aes(y = macd, color = "MACD线"), size = 0.8) +
+    geom_line(aes(y = macd_signal_line, color = "信号线"), size = 0.8) +
+    geom_point(aes(y = macd, color = factor(macd_signal)), shape = 16, size = 3, alpha = 0.7) +
+    geom_bar(
+      aes(y = macd_histogram, fill = ifelse(macd_histogram >= 0, "上涨", "下跌")), 
+      stat = "identity", width = 1, alpha = 0.7
+    ) +
+    scale_color_manual(
+      name = "指标线",
+      values = c(
+        "MACD线" = "#1E88E5", "信号线" = "#D81B60",
+        "0" = "#9E9E9E", "1" = "#43A047", "-1" = "#E53935"
+      )
+    ) +
+    scale_fill_manual(
+      name = "MACD柱状图",
+      values = c("上涨" = "#43A047", "下跌" = "#E53935"),
+      labels = c("正值", "负值")
+    ) +
+    labs(
+      title = paste(company_name, "-MACD指标"), 
+      y = "MACD值", 
+      x = "日期"
+    ) +
     theme_minimal(base_family = "SimHei") +
-    theme(legend.position = "top") +
-    scale_x_date(date_labels = "%Y-%m-%d",
-                 limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
-                 )
+    theme(
+      plot.title = title_style,  # 左对齐标题
+      legend.position = "top",
+      legend.title = element_text(face = "bold"),
+      legend.box = "horizontal",
+      panel.grid.minor = element_blank(),
+      axis.title = element_text(face = "bold")
+    ) +
+    scale_x_date(
+      date_labels = "%m-%d",
+      limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date())),
+      expand = c(0.01, 0)
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "#9E9E9E", size = 0.5)
 
-  macd_plot <- candlestick_plot/macd_price_plot
-  
-  return(list(sma_price_plot, kdj_plot, macd_plot))
+  # 组合蜡烛图和成交量图（保持原逻辑）
+  combined_candle_volume <- plot_grid(
+    price_plot, volume_plot, 
+    ncol = 1, nrow = 2, 
+    align = "v", 
+    rel_heights = c(2, 1)
+  )
+
+  return(list(
+    combined_candle_volume = combined_candle_volume,
+    sma_price_plot = sma_price_plot,
+    kdj_price_plot = kdj_price_plot,
+    macd_price_plot = macd_price_plot
+  ))
 }
 
 # 执行数据处理函数
@@ -222,7 +298,7 @@ indicator_results <- calculate_indicators_and_signals(stock_data_result, config)
 aggregate_signal <- map2_df(indicator_results, names(indicator_results), function(data, company_name) {
   data %>%
     mutate(company = company_name) %>%
-    select(date, company, kdj_signal, sma_signal, price_signal, macd_signal)
+    select(Date, company, kdj_signal, price_signal, sma_signal, macd_signal)
 })
 
 # 定义特定时间段
@@ -230,16 +306,16 @@ start_date <- zoo::as.Date("2025-05-01")
 end_date <- Sys.Date()
 
 # 筛选特定时间段的数据
-filtered_signal <- aggregate_signal  %>%  arrange(desc(date)) %>%
-  filter(date == as.Date(Sys.Date()-1))
+filtered_signal <- aggregate_signal  %>%  arrange(desc(Date)) %>%
+  filter(Date == as.Date(Sys.Date()-1))
 
 # 筛选特定时间段的数据
-filtered_signal_his <- aggregate_signal  %>%  arrange(company, desc(date)) %>%
-      filter(date >= start_date & date <= end_date)
+filtered_signal_his <- aggregate_signal  %>%  arrange(company, desc(Date)) %>%
+      filter(Date >= start_date & Date <= end_date)
 
 history_signal <- function(name){
-   history_signal <- aggregate_signal  %>%  arrange(company, desc(date)) %>%
-     filter(date >= start_date & date <= end_date & company == name)
+   history_signal <- aggregate_signal  %>%  arrange(company, desc(Date)) %>%
+     filter(Date >= start_date & Date <= end_date & company == name)
    return(history_signal)
 }
 
