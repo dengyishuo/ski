@@ -1,0 +1,438 @@
+---
+title: "乘风破浪新起点"
+author:
+  - ©️MatrixSpk
+documentclass: ctexart
+keywords:
+  - 报告
+  - kdj
+output:
+  rticles::ctex:
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+---
+
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message =FALSE)
+# 0. 加载所有必要的包
+library(tidyverse)
+library(quantmod)
+library(eTTR)
+library(patchwork)
+library(zoo)
+library(tidyquant)
+library(scales)
+library(dplyr)
+library(DT)
+library(kableExtra)
+library(knitr)
+library(xts)
+library(showtext)
+font_add("SimHei", regular = "SimHei.ttf")
+showtext_auto()
+
+# 1. 参数配置
+config <- list(
+  stock_list = list(
+    YD = "600238.ss",
+    MKLD = "600882.ss",
+    DHKJ = "600844.ss",
+    HPDL = "603121.ss",
+    SLW = "300295.sz",
+    WYZK = "300420.sz",
+    YSYE = "002566.sz",
+    YCZY = "002998.sz"
+  ),
+  indicators = list(
+    sma = c(5, 10, 20),
+    kdj = list(n = 9, d = 3, j = 3),
+    macd = list(fast = 12, slow = 26, signal = 9)
+  ),
+  data_path = "data/",
+  chart_path = "charts/"
+)
+
+# 获取数据
+process_stock_data <- function(config) {
+  result <- list()
+  for (company_name in names(config$stock_list)) {
+    symbol <- config$stock_list[[company_name]]
+    tryCatch({
+      # 获取数据
+      stock_data <- getSymbols(symbol, src = "yahoo", auto.assign = FALSE, from = "2025-03-01")
+      colnames(stock_data) <- c("Open", "High", "Low", "Close", "Volume", "Adjusted")
+      # 转换为tibble对象
+      tibble_data <- as_tibble(fortify.zoo(stock_data))
+
+      # 重新命名列名
+      renamed_data <- tibble_data %>%
+        rename(
+          date = Index,
+          open = Open,
+          high = High,
+          low = Low,
+          close = Close,
+          trading = Volume,
+          adjusted = Adjusted
+        )
+      # 数据对象动态命名
+      assign(paste0(company_name, "_tibble"), renamed_data, envir =.GlobalEnv)
+      result[[company_name]] <- renamed_data
+    }, error = function(e) {
+      message(paste("获取", company_name, "数据时出错:", conditionMessage(e)))
+    })
+  }
+  return(result)
+}
+
+# 计算指标和信号
+calculate_indicators_and_signals <- function(stock_data_result, config) {
+  for (company_name in names(stock_data_result)) {
+    data <- stock_data_result[[company_name]]
+
+    # 计算KDJ指标和信号
+    ohlc <- xts(data %>% select(-date), order.by = data$date)
+    kdj_result <- KDJ(ohlc, n = config$indicators$kdj$n, m1 = config$indicators$kdj$d, m2 = config$indicators$kdj$j)
+    data <- data %>%
+       mutate(
+         k = kdj_result[,"K"],
+         d = kdj_result[,"D"],
+         j = kdj_result[,"J"],
+         kdj_signal = case_when(
+          quantmod::Lag(kdj_result[,"K"]) < quantmod::Lag(kdj_result[,"D"]) & kdj_result[,"K"] > kdj_result[,"D"]  ~ 1,           quantmod::Lag(kdj_result[,"K"]) > quantmod::Lag(kdj_result[,"D"]) & kdj_result[,"K"] < kdj_result[,"D"] ~ -1,
+      TRUE ~ 0
+    )
+  )
+
+    # 计算MACD指标和信号
+    macd_result <- MACD(data$close, nFast = config$indicators$macd$fast, nSlow = config$indicators$macd$slow, nSig = config$indicators$macd$signal)
+    data <- data %>%
+      mutate(
+        macd = macd_result[,"macd"],
+        signal_line = macd_result[,"signal"],
+        macd_diff = macd_result[,"macd"] - macd_result[,"signal"],
+        macd_signal = case_when(
+          macd_result[,"macd"] > macd_result[,"signal"] & dplyr::lag(macd_result[,"macd"], default = 0) < dplyr::lag(macd_result[,"signal"], default = 0) ~ 1,
+          macd_result[,"macd"] < macd_result[,"signal"] & dplyr::lag(macd_result[,"macd"], default = 0) > dplyr::lag(macd_result[,"signal"], default = 0) ~ -1,
+          TRUE ~ 0
+        )
+      )
+
+    # 计算SMA指标和信号
+    data <- data %>%
+      mutate(
+        sma_5 = SMA(data$close, n = config$indicators$sma[1]),
+        sma_10 = SMA(data$close, n = config$indicators$sma[2]),
+        sma_20 = SMA(data$close, n = config$indicators$sma[3]),
+        sma_signal = case_when(
+          sma_5 > sma_20 & dplyr::lag(sma_5, default = 0) < lag(sma_20, default = 0) ~ 1,
+          sma_5 < sma_20 & dplyr::lag(sma_5, default = 0) > lag(sma_20, default = 0) ~ -1,
+          TRUE ~ 0
+        ),
+        price_signal = case_when(
+          close > sma_5 & dplyr::lag(close, default = 0) <= dplyr::lag(sma_5, default = 0) ~ 1,
+          close < sma_5 & dplyr::lag(close, default = 0) >= dplyr::lag(sma_5, default = 0) ~ -1,
+          TRUE ~ 0
+        )
+      )
+
+    stock_data_result[[company_name]] <- data
+  }
+  return(stock_data_result)
+}
+
+# 绘图函数
+plot_stock_analysis <- function(company_data, company_name) {
+  # 蜡烛图
+  candlestick_plot <- ggplot(company_data, aes(x = date)) +
+    tidyquant::geom_candlestick(aes(open = open, high = high, low = low, close = close)) +
+    labs(title = paste(company_name, "蜡烛图"), subtitle = "OHLC数据") +
+    theme_minimal(base_family = "SimHei") +
+    theme(legend.position = "top") +
+    scale_x_date(date_labels = "%Y-%m-%d",
+                 limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
+                 )
+
+  # SMA和价格线图
+  sma_price_plot <- ggplot(company_data, aes(x = date)) +
+    tidyquant::geom_candlestick(aes(open = open, high = high, low = low, close = close)) +
+    labs(title = paste(company_name, "蜡烛图"), subtitle = "OHLC数据") +
+    geom_line(aes(y = close, color = "价格"), size = 0.1) +
+    geom_line(aes(y = sma_5, color = "SMA5"), size = 0.1) +
+    geom_line(aes(y = sma_10, color = "SMA10"), size =0.1) +
+    geom_line(aes(y = sma_20, color = "SMA20"), size = 0.1) +
+    geom_point(aes(y = close, color = factor(sma_signal)),
+               shape = 21, size = 0.3, alpha = 0.7) +
+    geom_point(aes(y = close, color = factor(price_signal)),
+               shape = 21, size = 0.3, alpha = 0.7) +
+    scale_color_manual(values = c("价格" = "black", "SMA5" = "blue", "SMA10" = "purple", "SMA20" = "orange",
+                                  "0" = "gray", "1" = "green", "-1" = "red", "2" = "yellow")) +
+    labs(title = paste(company_name, "SMA和价格线图"), subtitle = "SMA指标与价格走势") +
+    theme_minimal(base_family = "SimHei") +
+    theme(legend.position = "top") +
+    scale_x_date(date_labels = "%Y-%m-%d",
+                 limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
+                 )
+
+  # KDJ和价格线图
+  kdj_price_plot <- ggplot(company_data, aes(x = date)) +
+    geom_line(aes(y = k, color = "K线"), size = 0.5) +
+    geom_line(aes(y = d, color = "D线"), size = 0.5) +
+    geom_line(aes(y = j, color = "J线"), size = 0.5) +
+    geom_point(aes(y = k, color = factor(kdj_signal)),
+               shape = 21, size = 0.3, alpha = 0.7) +
+    scale_color_manual(values = c("价格" = "black", "K线" = "blue", "D线" = "red", "J线" = "green", "0" = "gray", "1" = "green", "-1" = "red")) +
+    labs(title = paste(company_name, "KDJ和价格线图"), subtitle = "KDJ指标与价格走势") +
+    theme_minimal(base_family = "SimHei") +
+    theme(legend.position = "top") +
+    scale_x_date(date_labels = "%Y-%m-%d",
+                 limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
+                 )
+  kdj_plot <- candlestick_plot/kdj_price_plot
+
+  # MACD和价格线图
+  macd_price_plot <- ggplot(company_data, aes(x = date)) +
+    geom_line(aes(y = macd, color = "MACD线"), size = 0.5) +
+    geom_line(aes(y = signal_line, color = "MACD信号线"), size = 0.5) +
+    geom_point(aes(y = macd, color = factor(macd_signal)),
+               shape = 21, size = 0.3, alpha = 0.7) +
+    scale_color_manual(values = c("价格" = "black", "MACD线" = "blue", "MACD信号线" = "red", "0" = "gray", "1" = "green", "-1" = "red")) +
+    labs(title = paste(company_name, "MACD和价格线图"), subtitle = "MACD指标与价格走势") +
+    theme_minimal(base_family = "SimHei") +
+    theme(legend.position = "top") +
+    scale_x_date(date_labels = "%Y-%m-%d",
+                 limits = c(as.Date(Sys.Date()-60), as.Date(Sys.Date()))
+                 )
+
+  macd_plot <- candlestick_plot/macd_price_plot
+  
+  return(list(sma_price_plot, kdj_plot, macd_plot))
+}
+
+# 执行数据处理函数
+stock_data_result <- process_stock_data(config)
+
+# 计算指标和信号
+indicator_results <- calculate_indicators_and_signals(stock_data_result, config)
+
+# 整理数据生成表格
+aggregate_signal <- map2_df(indicator_results, names(indicator_results), function(data, company_name) {
+  data %>%
+    mutate(company = company_name) %>%
+    select(date, company, kdj_signal, sma_signal, price_signal, macd_signal)
+})
+
+# 定义特定时间段
+start_date <- zoo::as.Date("2025-05-01")
+end_date <- Sys.Date()
+
+# 筛选特定时间段的数据
+filtered_signal <- aggregate_signal  %>%  arrange(desc(date)) %>%
+  filter(date == as.Date(Sys.Date()-1))
+
+# 筛选特定时间段的数据
+filtered_signal_his <- aggregate_signal  %>%  arrange(company, desc(date)) %>%
+      filter(date >= start_date & date <= end_date)
+
+history_signal <- function(name){
+   history_signal <- aggregate_signal  %>%  arrange(company, desc(date)) %>%
+     filter(date >= start_date & date <= end_date & company == name)
+   return(history_signal)
+}
+
+# 提取公司名
+name <- names(config[["stock_list"]])
+# 输出表格
+# filtered_signal
+```
+
+
+
+# 引言
+
+本报告自动监控的股票为`r config$stock_list`。
+
+# 信号表现
+
+## 最近信号
+
+本观察期，被监控标的的信号如下：
+
+```{r signal, echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+knitr::kable(filtered_signal, caption = "买卖信号表") %>%
+  kable_styling(font_size = 9)
+```
+
+
+信号说明：
+
+* 买入信号：1
+* 卖出信号：-1
+* 持仓不动：0
+
+## 历史信号：
+
+
+`r name[1]`的历史信号如下：
+
+```{R his_1, echo=FALSE, message=FALSE, warning=FALSE, results = "markup"}
+signal <- history_signal(name[1])
+knitr::kable(signal, caption = paste0(name[1],"的历史买卖信号表")) %>%
+  kable_styling(font_size = 9)
+```
+
+`r name[2]`的历史信号如下：
+
+```{R his_2, echo=FALSE, message=FALSE, warning=FALSE, results = "markup"}
+signal <- history_signal(name[2])
+knitr::kable(signal, caption = paste0(name[2],"的历史买卖信号表")) %>%
+  kable_styling(font_size = 9)
+```
+
+`r name[3]`的历史信号如下：
+
+```{R his_3, echo=FALSE, message=FALSE, warning=FALSE, results = "markup"}
+signal <- history_signal(name[3])
+knitr::kable(signal, caption = paste0(name[3],"的历史买卖信号表")) %>%
+  kable_styling(font_size = 9)
+```
+
+`r name[4]`的历史信号如下：
+
+```{R his_4, echo=FALSE, message=FALSE, warning=FALSE, results = "markup"}
+signal <- history_signal(name[4])
+knitr::kable(signal, caption = paste0(name[4],"的历史买卖信号表")) %>%
+  kable_styling(font_size = 9)
+```
+
+`r name[5]`的历史信号如下：
+
+```{R his_5, echo=FALSE, message=FALSE, warning=FALSE, results = "markup"}
+signal <- history_signal(name[5])
+knitr::kable(signal, caption = paste0(name[5],"的历史买卖信号表")) %>%
+  kable_styling(font_size = 9)
+```
+
+
+`r name[6]`的历史信号如下：
+
+```{R his_6, echo=FALSE, message=FALSE, warning=FALSE, results = "markup"}
+signal <- history_signal(name[6])
+knitr::kable(signal, caption = paste0(name[6],"的历史买卖信号表")) %>%
+  kable_styling(font_size = 9)
+```
+
+`r name[7]`的历史信号如下：
+
+```{R his_7, echo=FALSE, message=FALSE, warning=FALSE, results = "markup"}
+signal <- history_signal(name[7])
+knitr::kable(signal, caption = paste0(name[7],"的历史买卖信号表")) %>%
+  kable_styling(font_size = 9)
+```
+
+
+`r name[8]`的历史信号如下：
+
+```{R his_8, echo=FALSE, message=FALSE, warning=FALSE, results = "markup"}
+signal <- history_signal(name[8])
+knitr::kable(signal, caption = paste0(name[8],"的历史买卖信号表")) %>%
+  kable_styling(font_size = 9)
+```
+
+# 技术指标含义及信号生成逻辑
+
+本报告主要运用了KDJ、MACD和SMA这几种技术指标来生成交易信号，辅助量化投资分析。
+
+## KDJ指标
+
+### 含义
+
+KDJ指标全称为随机指标（Stochastic Oscillator），通过计算一定周期内的最高价、最低价与收盘价之间的关系，来反映市场的超买超卖状态。其计算涉及以下公式：
+
+$$
+RSV_{n}  = \frac{C_{n} - L_{n}}{H_{n} - L_{n}} \times 100 
+$$
+
+$$
+K_{n}  = \frac{2}{3}K_{n - 1} + \frac{1}{3}RSV_{n} 
+$$
+$$
+D_{n}  = \frac{2}{3}D_{n - 1} + \frac{1}{3}K_{n} 
+$$
+
+
+$$
+J_{n}  = 3K_{n} - 2D_{n}
+$$
+
+其中， $C_{n}$ 为当前周期收盘价, $L_{n}$ 为 $n$ 周期内最低价，$H_{n}$ 为 $n$ 周期内最高价。在代码中，通常设定 $n = 9$ ，且初始的 $K_{0}$ 和 $D_{0}$ 一般设为50。K值为快速指标，D值为慢速指标，J值为K值和D值的加权平均值，且波动更为灵敏。通常，K、D、J值在0 - 100之间波动。
+
+### 信号生成逻辑
+
+当K值大于D值，并且K值小于20时，生成买入信号，表明市场处于超卖状态，价格可能反弹；当K值小于D值，并且K值大于80时，生成卖出信号，意味着市场处于超买状态，价格可能回调；其他情况则信号为0，表示市场趋势不明确。
+
+## MACD指标
+
+### 含义
+
+MACD指标即指数平滑异同移动平均线（Moving Average Convergence Divergence），由MACD线、信号线（Signal Line）和柱状线（Histogram）组成。其核心计算基于移动平均线的差值，相关公式如下：
+
+$$
+EMA_{fast} = \frac{2}{N_{fast} + 1} \times C_{n} + \frac{N_{fast} - 1}{N_{fast} + 1} \times EMA_{fast, n - 1} 
+$$
+
+$$
+EMA_{slow} = \frac{2}{N_{slow} + 1} \times C_{n} + \frac{N_{slow} - 1}{N_{slow} + 1} \times EMA_{slow, n - 1} 
+$$
+
+$$
+MACD_{n} = EMA_{fast}-EMA_{slow} 
+$$
+
+$$
+Signal_{n}  = \frac{2}{N_{signal} + 1} \times MACD_{n} + \frac{N_{signal} - 1}{N_{signal} + 1} \times Signal_{n - 1}
+$$
+
+在代码中，通常设定 $N_{fast} = 12$ ， $N_{slow} = 26$ ，$N_{signal} = 9$ 。MACD线是快速移动平均线（通常为12日）与慢速移动平均线（通常为26日）的差值，信号线则是MACD线的9日指数移动平均线。它主要用于判断市场的趋势方向、强度以及可能的反转点。
+
+### 信号生成逻辑
+
+当MACD线大于信号线，并且前一日MACD线小于前一日信号线时，生成买入信号暗示市场短期向上动能增强；当MACD线小于信号线，并且前一日MACD线大于前一日信号线时，生成卖出信号，表示市场短期向下动能增强；其他情况信号为0，表明市场趋势平稳或趋势转换不明显。
+
+## SMA指标
+
+### 含义
+
+SMA指标即简单移动平均线（Simple Moving Average），它是对一定时期内的收盘价进行简单平均计算得到的曲线。计算公式为：
+
+$$
+SMA_{n} = \frac{\sum_{i = n - N + 1}^{n} C_{i}}{N} 
+$$
+
+其中，$C_{i}$ 为第 $i$ 期的收盘价，$N$  为计算周期。例如，5日简单移动平均线（SMA5）是最近5个交易日收盘价的平均值，它能够平滑价格波动，反映价格的短期趋势。
+
+### 信号生成逻辑
+
+这里涉及两种信号生成逻辑。
+
+其一，当SMA5大于SMA20，并且前一日SMA5小于前一日SMA20时，生成买入信号，显示短期均线向上穿越长期均线，市场短期趋势向上；当SMA5小于SMA20，并且前一日SMA5大于前一日SMA20时，生成卖出信号，意味着短期均线向下穿越长期均线，市场短期趋势向下；其他情况信号为0。
+
+其二，当收盘价大于SMA5，并且前一日收盘价小于等于前一日SMA5时，生成买入信号；当收盘价小于SMA5，并且前一日收盘价大于等于前一日SMA5时，生成卖出信号；其余情况信号为0，这种信号生成逻辑更侧重于收盘价与短期均线的直接关系来判断买卖时机。
+
+这些技术指标及其信号生成逻辑为量化投资策略提供了重要依据，帮助投资者通过分析历史价格数据来预测未来价格走势，制定相应的投资决策。 
+
+# 附录
+
+
+```{R vis, echo=FALSE, message=FALSE, warning=FALSE}
+# 绘图并展示
+for (company_name in names(indicator_results)) {
+  plots <- plot_stock_analysis(indicator_results[[company_name]], company_name)
+  for (plot in plots) {
+    print(plot)
+  }
+}
+```
