@@ -15,7 +15,8 @@ output:
 
 \newpage
 
-```{r setup, include=FALSE, message = FALSE, warning = FALSE}
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message =FALSE)
 # 0. 加载所有必要的包
 library(tidyverse)
 library(quantmod)
@@ -33,9 +34,7 @@ library(cowplot)
 library(showtext)
 font_add("SimHei", regular = "SimHei.ttf")
 showtext_auto()
-```
 
-```{R config, include=FALSE}
 # 1. 参数配置
 config <- list(
   stock_list = list(
@@ -303,7 +302,7 @@ aggregate_signal <- map2_df(indicator_results, names(indicator_results), functio
 })
 
 # 定义特定时间段
-start_date <- zoo::as.Date("2025-05-01")
+start_date <- "2025-05-01"
 end_date <- Sys.Date()
 
 # 筛选特定时间段的数据
@@ -327,6 +326,334 @@ name <- names(config[["stock_list"]])
 ```
 
 
+```{R}
+# 加载必要包
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(ggplot2, xts, tidyr, dplyr, lubridate, gridExtra, quantmod)
+
+# 增强日期转换函数（支持14种格式）
+safe_date_conversion <- function(date_obj) {
+  if (is.null(date_obj)) return(NULL)
+  if (inherits(date_obj, "Date")) return(date_obj)
+  
+  # 处理常见异常类型
+  if (is.factor(date_obj)) date_obj <- as.character(date_obj)
+  if (is.POSIXct(date_obj)) return(as.Date(date_obj))
+  if (is.numeric(date_obj) && nchar(date_obj) > 5) {
+    try_date <- as.Date(as.POSIXct(date_obj, origin = "1970-01-01"))
+    if (!any(is.na(try_date))) return(try_date)
+  }
+  
+  # 定义支持的日期格式
+  date_formats <- c(
+    "%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y", "%Y.%m.%d",
+    "%Y%m%d", "%b %d %Y", "%B %d %Y", "%d %b %Y",
+    "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M",
+    "%Y/%m/%d", "%y-%m-%d", "%d/%m/%y", "%Y年%m月%d日"
+  )
+  
+  # 尝试所有格式转换
+  converted <- rep(NA, length(date_obj))
+  for (fmt in date_formats) {
+    na_before <- sum(is.na(converted))
+    converted[is.na(converted)] <- as.Date(date_obj[is.na(converted)], format = fmt)
+    if (sum(is.na(converted)) == 0) break
+    if (sum(is.na(converted)) == na_before) next
+  }
+  
+  # 生成警告信息
+  if (any(is.na(converted))) {
+    bad_samples <- unique(date_obj[is.na(converted)])[1:3]
+    warning(paste("部分日期转换失败（示例）：", paste(bad_samples, collapse = ", ")))
+  }
+  
+  return(converted)
+}
+
+# 策略绩效计算函数（完整修复版）
+calculate_strategy_performance <- function(indicator_results, config, start_date_str, end_date_str) {
+  # 日期预处理
+  start_date <- safe_date_conversion(start_date_str)
+  end_date <- safe_date_conversion(end_date_str)
+  
+  # 修正点1：补全缺失的右括号
+  if (any(is.na(c(start_date, end_date)))) {  # 这里补全了缺失的右括号
+    invalid_dates <- c(if (is.na(start_date)) start_date_str else NULL,
+                      if (is.na(end_date)) end_date_str else NULL)
+    stop(paste("无效的日期输入：", paste(invalid_dates, collapse = ", ")))
+  }
+  
+  if (start_date >= end_date) stop("开始日期必须早于结束日期")
+  
+  performance_results <- list()
+  
+  # 处理每只股票
+  for (company_name in names(indicator_results)) {
+    data <- indicator_results[[company_name]]
+    
+    # 自动检测日期列
+    if (!"Date" %in% colnames(data)) {
+      date_cols <- grep("date|time", colnames(data), ignore.case = TRUE, value = TRUE)
+      if (length(date_cols) > 0) {
+        data <- data %>% rename(Date = !!sym(date_cols[1]))
+        message(paste(company_name, "：自动识别日期列为", date_cols[1]))
+      } else {
+        message(paste(company_name, "：缺少日期列，跳过"))
+        next
+      }
+    }
+    
+    # 转换日期列
+    data$Date <- safe_date_conversion(data$Date)
+    
+    # 过滤无效日期
+    if (any(is.na(data$Date))) {
+      na_count <- sum(is.na(data$Date))
+      message(paste(company_name, "：过滤", na_count, "行无效日期"))
+      data <- data %>% filter(!is.na(Date))
+    }
+    
+    # 筛选时间范围
+    data <- data %>% 
+      filter(Date >= start_date & Date <= end_date) %>%
+      arrange(Date)
+    
+    if (nrow(data) == 0) {
+      message(paste(company_name, "：在指定时间段无数据"))
+      next
+    }
+    
+    # 初始化绩效数据
+    performance_data <- data.frame(
+      indicator = character(),
+      trades = integer(),
+      wins = integer(),
+      win_rate = numeric(),
+      avg_return = numeric(),
+      max_return = numeric(),
+      cumulative_return = numeric(),
+      sharpe_ratio = numeric(),
+      stringsAsFactors = FALSE
+    )
+    
+    # 定义指标列表
+    indicators <- list(
+      list(signal_col = "kdj_signal", name = "KDJ"),
+      list(signal_col = "price_signal", name = "PriceCross"),
+      list(signal_col = "sma_signal", name = "SMACross"),
+      list(signal_col = "macd_signal", name = "MACD")
+    )
+    
+    # 计算各指标绩效
+    for (ind in indicators) {
+      # 修正点2：添加缺失的管道操作符
+      signal_data <- data %>% 
+        filter(!!sym(ind$signal_col) != 0) %>%
+        mutate(Date = safe_date_conversion(Date))  # 添加管道操作符
+      
+      if (nrow(signal_data) == 0) next
+      
+      # 计算信号收益率
+      returns <- tryCatch(
+        calculate_signal_returns(signal_data, ind$signal_col),
+        error = function(e) {
+          message(paste(ind$name, "收益率计算失败：", e$message))
+          return(data.frame())
+        }
+      )
+      
+      # 计算绩效指标
+      if (nrow(returns) > 0) {
+        performance <- data.frame(
+          indicator = ind$name,
+          trades = nrow(returns),
+          wins = sum(returns$return > 0),
+          win_rate = mean(returns$return > 0) * 100,
+          avg_return = mean(returns$return) * 100,
+          max_return = max(returns$return) * 100,
+          cumulative_return = (prod(1 + returns$return) - 1) * 100,
+          sharpe_ratio = ifelse(sd(returns$return) > 0,
+                               (mean(returns$return) - 0.03/252) / sd(returns$return) * sqrt(252),
+                               0),
+          stringsAsFactors = FALSE
+        )
+        performance_data <- rbind(performance_data, performance)
+      }
+    }
+    
+    performance_results[[company_name]] <- performance_data
+  }
+  return(performance_results)
+}
+
+# 增强的信号收益率计算
+calculate_signal_returns <- function(signal_data, signal_col, holding_period = 1) {
+  # 验证输入数据
+  if (!inherits(signal_data, "data.frame")) stop("需要数据框输入")
+  required_cols <- c("Date", "close", signal_col)
+  missing_cols <- setdiff(required_cols, colnames(signal_data))
+  if (length(missing_cols) > 0) stop(paste("缺少必要列：", paste(missing_cols, collapse = ", ")))
+  
+  # 排序和日期验证
+  signal_data <- signal_data %>%
+    arrange(Date) %>%
+    mutate(Date = safe_date_conversion(Date)) %>%
+    filter(!is.na(Date))
+  
+  returns <- list()
+  
+  # 计算每个信号
+  for (i in seq_len(nrow(signal_data))) {
+    current_signal <- signal_data[i, ]
+    entry_date <- current_signal$Date
+    entry_price <- current_signal$close
+    signal_value <- current_signal[[signal_col]]
+    
+    # 寻找退出点
+    exit_info <- signal_data %>%
+      filter(Date > entry_date) %>%
+      slice(1)  # 简单模式：下一个信号点退出
+    
+    # 如果没有后续信号，使用最后一天收盘价
+    if (nrow(exit_info) == 0) {
+      exit_info <- tail(signal_data, 1)
+      if (exit_info$Date == entry_date) next  # 排除同一天退出
+    }
+    
+    # 计算收益
+    exit_price <- exit_info$close
+    holding_days <- as.numeric(exit_info$Date - entry_date)
+    return_value <- (exit_price / entry_price - 1) * sign(signal_value)
+    
+    returns[[i]] <- data.frame(
+      entry_date = entry_date,
+      exit_date = exit_info$Date,
+      holding_days = holding_days,
+      return = return_value,
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # 合并结果
+  returns_df <- bind_rows(returns)
+  if (nrow(returns_df) > 0) {
+    returns_df <- returns_df %>%
+      filter(!is.na(return)) %>%
+      mutate(
+        return = round(return, 4),
+        holding_days = as.integer(holding_days)
+      )
+  }
+  return(returns_df)
+}
+
+# 增强版可视化函数
+generate_performance_charts <- function(performance_results) {
+  # 检查输入有效性
+  if (is.null(performance_results) || 
+      all(sapply(performance_results, nrow) == 0)) {
+    message("没有可用的绩效数据进行可视化")
+    return(NULL)
+  }
+  
+  # 创建统一数据框架（增加容错处理）
+  all_data <- tryCatch({
+    bind_rows(performance_results, .id = "company") %>%
+      # 确保必要列存在
+      mutate(
+        indicator = if (exists("indicator", where = .)) indicator else "Unknown",
+        trades = coalesce(trades, 0),
+        win_rate = coalesce(win_rate, 0),
+        avg_return = coalesce(avg_return, 0)
+      ) %>%
+      filter(!is.na(indicator))  # 过滤无效指标
+  }, error = function(e) {
+    message("数据合并失败：", e$message)
+    return(NULL)
+  })
+  
+  # 检查数据可用性
+  if (is.null(all_data) || nrow(all_data) == 0) {
+    message("无有效数据用于可视化")
+    return(NULL)
+  }
+  
+  # 1. 综合绩效热力图
+  heatmap <- ggplot(all_data, aes(x = company, y = indicator)) +
+    geom_tile(aes(fill = avg_return), color = "white") +
+    scale_fill_gradient2(
+      low = "red", 
+      mid = "white", 
+      high = "blue", 
+      midpoint = median(all_data$avg_return, na.rm = TRUE),
+      name = "平均收益率 (%)"
+    ) +
+    labs(
+      title = "各策略平均收益率热力图",
+      x = "公司",
+      y = "策略指标"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom"
+    )
+  
+  # 2. 动态回撤曲线
+  if ("cumulative_return" %in% colnames(all_data)) {
+    drawdown_data <- all_data %>%
+      group_by(company, indicator) %>%
+      arrange(Date) %>%
+      mutate(
+        peak = cummax(cumulative_return),
+        drawdown = (peak - cumulative_return)/peak
+      )
+    
+    drawdown_plot <- ggplot(drawdown_data, aes(x = Date, y = drawdown, color = company)) +
+      geom_line() +
+      facet_wrap(~indicator, scales = "free_y") +
+      labs(title = "策略动态回撤分析", y = "回撤比例") +
+      theme(legend.position = "top")
+  } else {
+    drawdown_plot <- NULL
+  }
+  
+  # 3. 多维度雷达图（增强容错）
+  if (n_distinct(all_data$indicator) > 1) {
+    radar_data <- all_data %>%
+      group_by(indicator) %>%
+      summarise(
+        avg_trades = mean(trades, na.rm = TRUE),
+        avg_win_rate = mean(win_rate, na.rm = TRUE),
+        avg_return = mean(avg_return, na.rm = TRUE),
+        .groups = "drop"
+      )
+    
+    radar_plot <- ggplot(radar_data, aes(x = indicator)) +
+      geom_col(aes(y = avg_trades, fill = "交易次数"), alpha = 0.5) +
+      geom_line(aes(y = avg_win_rate * max(avg_trades)/100, color = "胜率"), group = 1, size = 1) +
+      geom_point(aes(y = avg_win_rate * max(avg_trades)/100, color = "胜率")) +
+      scale_y_continuous(
+        name = "平均交易次数",
+        sec.axis = sec_axis(~ . * 100 / max(radar_data$avg_trades), name = "平均胜率 (%)")
+      ) +
+      labs(title = "策略多维度对比") +
+      theme_bw()
+  } else {
+    radar_plot <- NULL
+  }
+  
+  # 组合图表输出
+  if (!is.null(heatmap) || !is.null(drawdown_plot) || !is.null(radar_plot)) {
+    gridExtra::grid.arrange(
+      grobs = list(heatmap, drawdown_plot, radar_plot),
+      layout_matrix = matrix(c(1, 1, 2, 3), ncol = 2, byrow = TRUE),
+      top = textGrob("策略绩效分析", gp = gpar(fontsize = 18))
+  } else {
+    message("没有可用的图表组件")
+  }
+}
+```
 
 # 引言
 
